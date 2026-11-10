@@ -23,6 +23,79 @@ function admin_allergens_to_json($raw)
     return json_encode(array_values(array_unique($clean)));
 }
 
+/** Checkbox delle categorie, riusate anche dall'aggiornamento automatico. */
+function render_category_checks(array $categories, array $selectedCategoryIds)
+{
+    if (count($categories) === 0) {
+        echo '<p class="muted">Nessuna categoria disponibile.</p>';
+        return;
+    }
+    foreach ($categories as $cat) {
+        $checked = in_array($cat['idCategory'], $selectedCategoryIds, true) ? ' checked' : '';
+        echo '<label class="check"><input type="checkbox" name="categories[]" value="'
+            . h($cat['idCategory']) . '"' . $checked . '> '
+            . h($cat['nameCategory']) . '</label>';
+    }
+}
+
+/** Tabella dei prodotti, riusata anche dall'aggiornamento automatico. */
+function render_products_table(array $products, array $productCategoryNames)
+{
+    ?>
+    <div class="table-scroll" data-count="<?php echo count($products); ?>">
+        <?php if (count($products) === 0): ?>
+            <p class="muted">Nessun prodotto trovato.</p>
+        <?php else: ?>
+            <table class="table">
+                <thead>
+                <tr><th>Prodotto</th><th>Categorie</th><th>Prezzo</th><th class="hide-sm">Popolare</th><th class="hide-sm">Allergeni</th><th class="right">Azioni</th></tr>
+                </thead>
+                <tbody>
+                <?php foreach ($products as $p): ?>
+                    <?php
+                    $names = isset($productCategoryNames[$p['IdProduct']])
+                        ? $productCategoryNames[$p['IdProduct']]
+                        : ($p['category'] !== '' ? array($p['category']) : array());
+                    ?>
+                    <tr>
+                        <td>
+                            <strong><?php echo h($p['nameProduct']); ?></strong><br>
+                            <small class="muted"><?php echo h($p['IdProduct']); ?></small>
+                        </td>
+                        <td>
+                            <?php foreach ($names as $categoryName): ?>
+                                <span class="chip"><?php echo h($categoryName); ?></span>
+                            <?php endforeach; ?>
+                            <?php if (count($names) === 0): ?>—<?php endif; ?>
+                        </td>
+                        <td><?php echo h(money($p['basePrice'])); ?></td>
+                        <td class="hide-sm"><?php echo $p['isPopular'] ? 'Sì' : '—'; ?></td>
+                        <td class="hide-sm"><small><?php echo h(admin_allergens_to_text($p['allergens'])); ?></small></td>
+                        <td class="right nowrap">
+                            <a class="btn small ghost" href="products.php?action=edit&id=<?php echo h(urlencode($p['IdProduct'])); ?>">Modifica</a>
+                            <form method="post" action="products.php" class="inline"
+                                  onsubmit="return confirm('Eliminare questo prodotto? L\'ordine resterà nello storico.');">
+                                <?php echo csrf_field(); ?>
+                                <input type="hidden" name="form_action" value="delete">
+                                <input type="hidden" name="id" value="<?php echo h($p['IdProduct']); ?>">
+                                <button type="submit" class="btn small danger">Elimina</button>
+                            </form>
+                        </td>
+                    </tr>
+                <?php endforeach; ?>
+                </tbody>
+            </table>
+        <?php endif; ?>
+    </div>
+    <?php
+}
+
+if (get_value('fragment') === 'category_checks') {
+    header('Content-Type: text/html; charset=utf-8');
+    render_category_checks(admin_categories_ordered($pdo), array());
+    exit;
+}
+
 function admin_allergens_to_text($json)
 {
     $decoded = json_decode((string)$json, true);
@@ -279,20 +352,11 @@ if ($action === 'new' || $action === 'edit' || $repostWithErrors) {
             </label>
 
             <div class="grid-2">
-                <fieldset class="category-picker">
+                <fieldset class="category-picker" data-auto-refresh="category-checks">
                     <legend>Categorie (una o più)</legend>
-                    <?php if (count($categories) === 0): ?>
-                        <p class="muted">Nessuna categoria disponibile.</p>
-                    <?php else: ?>
-                        <?php foreach ($categories as $cat): ?>
-                            <label class="check">
-                                <input type="checkbox" name="categories[]"
-                                       value="<?php echo h($cat['idCategory']); ?>"
-                                       <?php echo in_array($cat['idCategory'], $selectedCategoryIds, true) ? 'checked' : ''; ?>>
-                                <?php echo h($cat['nameCategory']); ?>
-                            </label>
-                        <?php endforeach; ?>
-                    <?php endif; ?>
+                    <div data-category-options>
+                        <?php render_category_checks($categories, $selectedCategoryIds); ?>
+                    </div>
                     <p class="muted"><small>La prima categoria dell'elenco è quella principale per le vecchie versioni dell'app.</small></p>
                 </fieldset>
                 <label>Immagine (URL)
@@ -318,6 +382,7 @@ if ($action === 'new' || $action === 'edit' || $repostWithErrors) {
             </div>
         </form>
     </div>
+    <script src="assets/autorefresh.js" defer></script>
     <?php
     admin_footer();
     exit;
@@ -370,11 +435,17 @@ $productCategoryNames = admin_product_category_names($pdo, array_map(function ($
     return $p['IdProduct'];
 }, $products));
 
+if (get_value('fragment') === 'table') {
+    header('Content-Type: text/html; charset=utf-8');
+    render_products_table($products, $productCategoryNames);
+    exit;
+}
+
 admin_header('Prodotti', 'products', 'page-list');
 ?>
-<div class="panel list-panel">
+<div class="panel list-panel" data-auto-refresh="products-table">
     <div class="panel-head">
-        <h2>Menu (<?php echo count($products); ?>)</h2>
+        <h2>Menu (<span id="product-count"><?php echo count($products); ?></span>)</h2>
         <a class="btn primary" href="products.php?action=new">+ Nuovo prodotto</a>
     </div>
 
@@ -396,50 +467,7 @@ admin_header('Prodotti', 'products', 'page-list');
         <?php endif; ?>
     </form>
 
-    <?php if (count($products) === 0): ?>
-        <p class="muted">Nessun prodotto trovato.</p>
-    <?php else: ?>
-        <div class="table-scroll">
-        <table class="table">
-            <thead>
-            <tr><th>Prodotto</th><th>Categorie</th><th>Prezzo</th><th class="hide-sm">Popolare</th><th class="hide-sm">Allergeni</th><th class="right">Azioni</th></tr>
-            </thead>
-            <tbody>
-            <?php foreach ($products as $p): ?>
-                <?php
-                $names = isset($productCategoryNames[$p['IdProduct']])
-                    ? $productCategoryNames[$p['IdProduct']]
-                    : ($p['category'] !== '' ? array($p['category']) : array());
-                ?>
-                <tr>
-                    <td>
-                        <strong><?php echo h($p['nameProduct']); ?></strong><br>
-                        <small class="muted"><?php echo h($p['IdProduct']); ?></small>
-                    </td>
-                    <td>
-                        <?php foreach ($names as $categoryName): ?>
-                            <span class="chip"><?php echo h($categoryName); ?></span>
-                        <?php endforeach; ?>
-                        <?php if (count($names) === 0): ?>—<?php endif; ?>
-                    </td>
-                    <td><?php echo h(money($p['basePrice'])); ?></td>
-                    <td class="hide-sm"><?php echo $p['isPopular'] ? 'Sì' : '—'; ?></td>
-                    <td class="hide-sm"><small><?php echo h(admin_allergens_to_text($p['allergens'])); ?></small></td>
-                    <td class="right nowrap">
-                        <a class="btn small ghost" href="products.php?action=edit&id=<?php echo h(urlencode($p['IdProduct'])); ?>">Modifica</a>
-                        <form method="post" action="products.php" class="inline"
-                              onsubmit="return confirm('Eliminare questo prodotto? L\'ordine resterà nello storico.');">
-                            <?php echo csrf_field(); ?>
-                            <input type="hidden" name="form_action" value="delete">
-                            <input type="hidden" name="id" value="<?php echo h($p['IdProduct']); ?>">
-                            <button type="submit" class="btn small danger">Elimina</button>
-                        </form>
-                    </td>
-                </tr>
-            <?php endforeach; ?>
-            </tbody>
-        </table>
-        </div>
-    <?php endif; ?>
+    <?php render_products_table($products, $productCategoryNames); ?>
 </div>
+<script src="assets/autorefresh.js" defer></script>
 <?php admin_footer(); ?>
