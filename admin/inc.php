@@ -164,17 +164,119 @@ function status_class($status)
     return 'badge warn';
 }
 
+/** La migrazione multi-categoria è stata eseguita? (cache per richiesta) */
+function admin_has_multi_category(PDO $pdo)
+{
+    static $has = null;
+    if ($has === null) {
+        try {
+            $stmt = $pdo->prepare(
+                'SELECT COUNT(*) FROM information_schema.tables
+                 WHERE table_schema = DATABASE() AND table_name = ?'
+            );
+            $stmt->execute(array('product_categories'));
+            $has = (int)$stmt->fetchColumn() > 0;
+        } catch (Throwable $e) {
+            $has = false;
+        }
+    }
+    return $has;
+}
+
+/** La colonna categories.sortOrder esiste? (cache per richiesta) */
+function admin_has_category_order(PDO $pdo)
+{
+    static $has = null;
+    if ($has === null) {
+        try {
+            $stmt = $pdo->prepare(
+                'SELECT COUNT(*) FROM information_schema.columns
+                 WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?'
+            );
+            $stmt->execute(array('categories', 'sortOrder'));
+            $has = (int)$stmt->fetchColumn() > 0;
+        } catch (Throwable $e) {
+            $has = false;
+        }
+    }
+    return $has;
+}
+
+/** Categorie ordinate come le vede l'app. */
+function admin_categories_ordered(PDO $pdo)
+{
+    $order = admin_has_category_order($pdo) ? 'sortOrder, nameCategory' : 'nameCategory';
+    return $pdo->query('SELECT * FROM categories ORDER BY ' . $order)->fetchAll();
+}
+
+/** Id delle categorie collegate a un prodotto. */
+function admin_product_category_ids(PDO $pdo, $productId)
+{
+    $ids = array();
+    if (admin_has_multi_category($pdo)) {
+        $stmt = $pdo->prepare('SELECT idCategory FROM product_categories WHERE productId = ?');
+        $stmt->execute(array($productId));
+        foreach ($stmt->fetchAll() as $row) {
+            $ids[] = $row['idCategory'];
+        }
+    }
+    return $ids;
+}
+
+/** Mappa productId => elenco nomi categoria, per le tabelle del pannello. */
+function admin_product_category_names(PDO $pdo, array $productIds)
+{
+    $map = array();
+    if (!admin_has_multi_category($pdo) || count($productIds) === 0) {
+        return $map;
+    }
+    $ids = array_values($productIds);
+    $placeholders = implode(',', array_fill(0, count($ids), '?'));
+    $order = admin_has_category_order($pdo) ? 'c.sortOrder, c.nameCategory' : 'c.nameCategory';
+    $stmt = $pdo->prepare(
+        'SELECT pc.productId, c.nameCategory
+         FROM product_categories pc
+         JOIN categories c ON c.idCategory = pc.idCategory
+         WHERE pc.productId IN (' . $placeholders . ')
+         ORDER BY ' . $order
+    );
+    $stmt->execute($ids);
+    foreach ($stmt->fetchAll() as $row) {
+        $map[$row['productId']][] = $row['nameCategory'];
+    }
+    return $map;
+}
+
 /** Riallinea il conteggio prodotti per categoria (usato dall'app). */
 function recalc_category_counts(PDO $pdo)
 {
+    if (admin_has_multi_category($pdo)) {
+        $pdo->exec('UPDATE categories c SET c.count = (
+            SELECT COUNT(DISTINCT pc.productId) FROM product_categories pc
+            WHERE pc.idCategory = c.idCategory
+        )');
+        return;
+    }
+
     $pdo->exec('UPDATE categories c SET c.count = (
         SELECT COUNT(*) FROM products p
         WHERE p.category = c.nameCategory OR p.category = c.idCategory
     )');
 }
 
+/** Avviso mostrato quando la migrazione del database non è stata eseguita. */
+function admin_migration_notice(PDO $pdo)
+{
+    if (admin_has_multi_category($pdo) && admin_has_category_order($pdo)) {
+        return;
+    }
+    echo '<div class="alert error">Migrazione database mancante: esegui '
+        . '<code>database/migrate_multi_category.sql</code> su phpMyAdmin per attivare '
+        . 'prodotti in più categorie e ordinamento delle categorie.</div>';
+}
+
 /** Intestazione comune delle pagine del pannello. */
-function admin_header($title, $active)
+function admin_header($title, $active, $bodyClass = '')
 {
     $admin = current_admin();
     ?>
@@ -186,7 +288,7 @@ function admin_header($title, $active)
     <title><?php echo h($title); ?> · FastBite Admin</title>
     <link rel="stylesheet" href="assets/admin.css">
 </head>
-<body>
+<body class="page-<?php echo h($active); ?><?php echo $bodyClass !== '' ? ' ' . h($bodyClass) : ''; ?>">
 <div class="layout">
     <aside class="sidebar">
         <div class="brand">🍔 FastBite <span>Admin</span></div>

@@ -6,11 +6,6 @@ $pdo = admin_db();
 $action = get_value('action', 'list');
 $errors = array();
 
-function admin_product_categories(PDO $pdo)
-{
-    return $pdo->query('SELECT idCategory, nameCategory FROM categories ORDER BY nameCategory')->fetchAll();
-}
-
 function admin_allergens_to_json($raw)
 {
     $raw = trim((string)$raw);
@@ -73,68 +68,118 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $description = post_value('description');
         $priceRaw = str_replace(',', '.', post_value('base_price'));
         $imageUrl = post_value('image_url');
-        $category = post_value('category');
         $isPopular = post_value('is_popular') === '1' ? 1 : 0;
         $allergens = post_value('allergens');
 
+        $selectedCategoryIds = array();
+        if (isset($_POST['categories']) && is_array($_POST['categories'])) {
+            foreach ($_POST['categories'] as $rawCategoryId) {
+                $rawCategoryId = trim((string)$rawCategoryId);
+                if ($rawCategoryId !== '') {
+                    $selectedCategoryIds[] = $rawCategoryId;
+                }
+            }
+            $selectedCategoryIds = array_values(array_unique($selectedCategoryIds));
+        }
+
+        $categoryNames = array();
+        foreach (admin_categories_ordered($pdo) as $cat) {
+            $categoryNames[$cat['idCategory']] = $cat['nameCategory'];
+        }
+
         if ($name === '') {
             $errors[] = 'Il nome del prodotto è obbligatorio.';
-        }
-        if ($category === '') {
-            $errors[] = 'Seleziona una categoria.';
         }
         if ($priceRaw === '' || !is_numeric($priceRaw) || (float)$priceRaw < 0) {
             $errors[] = 'Il prezzo deve essere un numero maggiore o uguale a zero.';
         }
 
+        if (count($selectedCategoryIds) === 0) {
+            $errors[] = 'Seleziona almeno una categoria.';
+        } else {
+            $validIds = array();
+            foreach ($selectedCategoryIds as $catId) {
+                if (isset($categoryNames[$catId])) {
+                    $validIds[] = $catId;
+                }
+            }
+            if (count($validIds) === 0) {
+                $errors[] = 'Categorie non valide.';
+            } elseif (!admin_has_multi_category($pdo) && count($validIds) > 1) {
+                $errors[] = 'Il database non supporta ancora più categorie: esegui database/migrate_multi_category.sql.';
+            }
+            $selectedCategoryIds = $validIds;
+        }
+
+        // products.category resta la categoria principale (prima selezionata),
+        // per compatibilità con le versioni dell'app che leggono un solo valore.
+        $primaryCategory = count($selectedCategoryIds) > 0 ? $categoryNames[$selectedCategoryIds[0]] : '';
+
         if (count($errors) === 0) {
             try {
+                $pdo->beginTransaction();
+
                 if ($isEdit) {
                     if ($id === '') {
-                        $errors[] = 'Prodotto non valido.';
-                    } else {
-                        $stmt = $pdo->prepare(
-                            'UPDATE products
-                             SET nameProduct = ?, description = ?, basePrice = ?, imageUrl = ?,
-                                 category = ?, isPopular = ?, allergens = ?
-                             WHERE IdProduct = ?'
-                        );
-                        $stmt->execute(array(
-                            $name,
-                            $description !== '' ? $description : null,
-                            (float)$priceRaw,
-                            $imageUrl !== '' ? $imageUrl : null,
-                            $category,
-                            $isPopular,
-                            admin_allergens_to_json($allergens),
-                            $id,
-                        ));
-                        recalc_category_counts($pdo);
-                        flash_set('ok', 'Prodotto aggiornato.');
-                        redirect('products.php');
+                        throw new RuntimeException('Prodotto non valido.');
                     }
+                    $stmt = $pdo->prepare(
+                        'UPDATE products
+                         SET nameProduct = ?, description = ?, basePrice = ?, imageUrl = ?,
+                             category = ?, isPopular = ?, allergens = ?
+                         WHERE IdProduct = ?'
+                    );
+                    $stmt->execute(array(
+                        $name,
+                        $description !== '' ? $description : null,
+                        (float)$priceRaw,
+                        $imageUrl !== '' ? $imageUrl : null,
+                        $primaryCategory,
+                        $isPopular,
+                        admin_allergens_to_json($allergens),
+                        $id,
+                    ));
+                    $productId = $id;
+                    $successMessage = 'Prodotto aggiornato.';
                 } else {
-                    $newId = admin_new_product_id($pdo);
+                    $productId = admin_new_product_id($pdo);
                     $stmt = $pdo->prepare(
                         'INSERT INTO products
                          (IdProduct, nameProduct, description, basePrice, imageUrl, category, isPopular, allergens)
                          VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
                     );
                     $stmt->execute(array(
-                        $newId,
+                        $productId,
                         $name,
                         $description !== '' ? $description : null,
                         (float)$priceRaw,
                         $imageUrl !== '' ? $imageUrl : null,
-                        $category,
+                        $primaryCategory,
                         $isPopular,
                         admin_allergens_to_json($allergens),
                     ));
-                    recalc_category_counts($pdo);
-                    flash_set('ok', 'Prodotto creato: ' . $newId);
-                    redirect('products.php');
+                    $successMessage = 'Prodotto creato: ' . $productId;
                 }
+
+                if (admin_has_multi_category($pdo)) {
+                    $deleteLinks = $pdo->prepare('DELETE FROM product_categories WHERE productId = ?');
+                    $deleteLinks->execute(array($productId));
+                    $insertLink = $pdo->prepare(
+                        'INSERT INTO product_categories (productId, idCategory) VALUES (?, ?)'
+                    );
+                    foreach ($selectedCategoryIds as $catId) {
+                        $insertLink->execute(array($productId, $catId));
+                    }
+                }
+
+                $pdo->commit();
+                recalc_category_counts($pdo);
+                flash_set('ok', $successMessage);
+                redirect('products.php');
             } catch (Throwable $e) {
+                if ($pdo->inTransaction()) {
+                    $pdo->rollBack();
+                }
                 error_log('FastBite admin save product: ' . $e->getMessage());
                 $errors[] = 'Errore nel salvataggio del prodotto.';
             }
@@ -174,7 +219,27 @@ if ($action === 'new' || $action === 'edit' || $repostWithErrors) {
         $form = $found;
     }
 
-    $categories = admin_product_categories($pdo);
+    $categories = admin_categories_ordered($pdo);
+
+    $selectedCategoryIds = array();
+    if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['categories']) && is_array($_POST['categories'])) {
+        foreach ($_POST['categories'] as $rawCategoryId) {
+            $rawCategoryId = trim((string)$rawCategoryId);
+            if ($rawCategoryId !== '') {
+                $selectedCategoryIds[] = $rawCategoryId;
+            }
+        }
+        $selectedCategoryIds = array_values(array_unique($selectedCategoryIds));
+    } elseif ($action === 'edit') {
+        $selectedCategoryIds = admin_product_category_ids($pdo, $form['IdProduct']);
+        if (count($selectedCategoryIds) === 0 && !empty($form['category'])) {
+            foreach ($categories as $cat) {
+                if ($cat['idCategory'] === $form['category'] || $cat['nameCategory'] === $form['category']) {
+                    $selectedCategoryIds[] = $cat['idCategory'];
+                }
+            }
+        }
+    }
 
     admin_header($action === 'edit' ? 'Modifica prodotto' : 'Nuovo prodotto', 'products');
     ?>
@@ -183,6 +248,8 @@ if ($action === 'new' || $action === 'edit' || $repostWithErrors) {
             <h2><?php echo $action === 'edit' ? h(isset($_POST['name']) ? post_value('name') : $form['nameProduct']) : 'Aggiungi un prodotto'; ?></h2>
             <a class="btn ghost" href="products.php">Torna all'elenco</a>
         </div>
+
+        <?php admin_migration_notice($pdo); ?>
 
         <?php if (count($errors) > 0): ?>
             <div class="alert error">
@@ -212,18 +279,22 @@ if ($action === 'new' || $action === 'edit' || $repostWithErrors) {
             </label>
 
             <div class="grid-2">
-                <label>Categoria
-                    <select name="category" required>
-                        <option value="">— seleziona —</option>
-                        <?php $currentCategory = isset($_POST['category']) ? post_value('category') : $form['category']; ?>
+                <fieldset class="category-picker">
+                    <legend>Categorie (una o più)</legend>
+                    <?php if (count($categories) === 0): ?>
+                        <p class="muted">Nessuna categoria disponibile.</p>
+                    <?php else: ?>
                         <?php foreach ($categories as $cat): ?>
-                            <option value="<?php echo h($cat['nameCategory']); ?>"
-                                <?php echo $cat['nameCategory'] === $currentCategory ? 'selected' : ''; ?>>
+                            <label class="check">
+                                <input type="checkbox" name="categories[]"
+                                       value="<?php echo h($cat['idCategory']); ?>"
+                                       <?php echo in_array($cat['idCategory'], $selectedCategoryIds, true) ? 'checked' : ''; ?>>
                                 <?php echo h($cat['nameCategory']); ?>
-                            </option>
+                            </label>
                         <?php endforeach; ?>
-                    </select>
-                </label>
+                    <?php endif; ?>
+                    <p class="muted"><small>La prima categoria dell'elenco è quella principale per le vecchie versioni dell'app.</small></p>
+                </fieldset>
                 <label>Immagine (URL)
                     <input type="text" name="image_url" maxlength="500"
                            value="<?php echo h(isset($_POST['image_url']) ? post_value('image_url') : $form['imageUrl']); ?>">
@@ -255,6 +326,20 @@ if ($action === 'new' || $action === 'edit' || $repostWithErrors) {
 // Elenco
 $q = get_value('q');
 $categoryFilter = get_value('category');
+$categories = admin_categories_ordered($pdo);
+
+$filterCategoryName = '';
+$filterCategoryId = '';
+if ($categoryFilter !== '') {
+    foreach ($categories as $cat) {
+        if ($cat['idCategory'] === $categoryFilter || $cat['nameCategory'] === $categoryFilter) {
+            $filterCategoryId = $cat['idCategory'];
+            $filterCategoryName = $cat['nameCategory'];
+            break;
+        }
+    }
+}
+
 $sql = 'SELECT * FROM products WHERE 1=1';
 $params = array();
 if ($q !== '') {
@@ -262,31 +347,45 @@ if ($q !== '') {
     $params[] = '%' . $q . '%';
     $params[] = '%' . $q . '%';
 }
-if ($categoryFilter !== '') {
-    $sql .= ' AND category = ?';
-    $params[] = $categoryFilter;
+if ($filterCategoryId !== '') {
+    if (admin_has_multi_category($pdo)) {
+        $sql .= ' AND (category = ? OR EXISTS (
+                    SELECT 1 FROM product_categories pc
+                    WHERE pc.productId = products.IdProduct AND pc.idCategory = ?
+                  ))';
+        $params[] = $filterCategoryName;
+        $params[] = $filterCategoryId;
+    } else {
+        $sql .= ' AND category = ?';
+        $params[] = $filterCategoryName;
+    }
 }
-$sql .= ' ORDER BY category ASC, nameProduct ASC';
+$sql .= ' ORDER BY nameProduct ASC';
 
 $stmt = $pdo->prepare($sql);
 $stmt->execute($params);
 $products = $stmt->fetchAll();
-$categories = admin_product_categories($pdo);
 
-admin_header('Prodotti', 'products');
+$productCategoryNames = admin_product_category_names($pdo, array_map(function ($p) {
+    return $p['IdProduct'];
+}, $products));
+
+admin_header('Prodotti', 'products', 'page-list');
 ?>
-<div class="panel">
+<div class="panel list-panel">
     <div class="panel-head">
         <h2>Menu (<?php echo count($products); ?>)</h2>
         <a class="btn primary" href="products.php?action=new">+ Nuovo prodotto</a>
     </div>
+
+    <?php admin_migration_notice($pdo); ?>
 
     <form method="get" action="products.php" class="filters">
         <input type="text" name="q" placeholder="Cerca per nome…" value="<?php echo h($q); ?>">
         <select name="category">
             <option value="">Tutte le categorie</option>
             <?php foreach ($categories as $cat): ?>
-                <option value="<?php echo h($cat['nameCategory']); ?>" <?php echo $cat['nameCategory'] === $categoryFilter ? 'selected' : ''; ?>>
+                <option value="<?php echo h($cat['idCategory']); ?>" <?php echo $cat['idCategory'] === $filterCategoryId ? 'selected' : ''; ?>>
                     <?php echo h($cat['nameCategory']); ?>
                 </option>
             <?php endforeach; ?>
@@ -300,18 +399,29 @@ admin_header('Prodotti', 'products');
     <?php if (count($products) === 0): ?>
         <p class="muted">Nessun prodotto trovato.</p>
     <?php else: ?>
+        <div class="table-scroll">
         <table class="table">
             <thead>
-            <tr><th>Prodotto</th><th>Categoria</th><th>Prezzo</th><th class="hide-sm">Popolare</th><th class="hide-sm">Allergeni</th><th class="right">Azioni</th></tr>
+            <tr><th>Prodotto</th><th>Categorie</th><th>Prezzo</th><th class="hide-sm">Popolare</th><th class="hide-sm">Allergeni</th><th class="right">Azioni</th></tr>
             </thead>
             <tbody>
             <?php foreach ($products as $p): ?>
+                <?php
+                $names = isset($productCategoryNames[$p['IdProduct']])
+                    ? $productCategoryNames[$p['IdProduct']]
+                    : ($p['category'] !== '' ? array($p['category']) : array());
+                ?>
                 <tr>
                     <td>
                         <strong><?php echo h($p['nameProduct']); ?></strong><br>
                         <small class="muted"><?php echo h($p['IdProduct']); ?></small>
                     </td>
-                    <td><?php echo h($p['category']); ?></td>
+                    <td>
+                        <?php foreach ($names as $categoryName): ?>
+                            <span class="chip"><?php echo h($categoryName); ?></span>
+                        <?php endforeach; ?>
+                        <?php if (count($names) === 0): ?>—<?php endif; ?>
+                    </td>
                     <td><?php echo h(money($p['basePrice'])); ?></td>
                     <td class="hide-sm"><?php echo $p['isPopular'] ? 'Sì' : '—'; ?></td>
                     <td class="hide-sm"><small><?php echo h(admin_allergens_to_text($p['allergens'])); ?></small></td>
@@ -329,6 +439,7 @@ admin_header('Prodotti', 'products');
             <?php endforeach; ?>
             </tbody>
         </table>
+        </div>
     <?php endif; ?>
 </div>
 <?php admin_footer(); ?>

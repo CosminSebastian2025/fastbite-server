@@ -51,6 +51,12 @@ function jsonError($message, $statusCode = 400, $extra = array())
 
 function formatProduct($row)
 {
+    // "categories" contiene tutti i nomi delle categorie del prodotto; "category"
+    // resta la categoria principale per compatibilità con le vecchie versioni.
+    $categories = isset($row['_categories']) && is_array($row['_categories'])
+        ? $row['_categories']
+        : (isset($row['category']) && $row['category'] !== '' ? array($row['category']) : array());
+
     return array(
         'IdProduct' => $row['IdProduct'],
         'nameProduct' => $row['nameProduct'],
@@ -58,9 +64,51 @@ function formatProduct($row)
         'basePrice' => (float)$row['basePrice'],
         'imageUrl' => $row['imageUrl'],
         'category' => $row['category'],
+        'categories' => array_values($categories),
         'isPopular' => (bool)$row['isPopular'],
         'allergens' => json_decode(isset($row['allergens']) ? $row['allergens'] : '[]', true)
     );
+}
+
+/**
+ * Aggiunge a ogni prodotto l'elenco delle categorie (nomi) dalla tabella
+ * product_categories. Se la migrazione non è ancora stata eseguita, ogni
+ * prodotto usa come elenco la sola categoria principale.
+ */
+function productsWithCategories(PDO $pdo, array $rows)
+{
+    $map = array();
+    if (count($rows) > 0) {
+        try {
+            $ids = array();
+            foreach ($rows as $row) {
+                $ids[] = $row['IdProduct'];
+            }
+            $placeholders = implode(',', array_fill(0, count($ids), '?'));
+            $stmt = $pdo->prepare(
+                'SELECT pc.productId, c.nameCategory
+                 FROM product_categories pc
+                 JOIN categories c ON c.idCategory = pc.idCategory
+                 WHERE pc.productId IN (' . $placeholders . ')
+                 ORDER BY c.sortOrder, c.nameCategory'
+            );
+            $stmt->execute($ids);
+            foreach ($stmt->fetchAll() as $link) {
+                $map[$link['productId']][] = $link['nameCategory'];
+            }
+        } catch (Throwable $e) {
+            error_log('FastBite product_categories non disponibile: ' . $e->getMessage());
+        }
+    }
+
+    $result = array();
+    foreach ($rows as $row) {
+        if (isset($map[$row['IdProduct']])) {
+            $row['_categories'] = $map[$row['IdProduct']];
+        }
+        $result[] = formatProduct($row);
+    }
+    return $result;
 }
 
 function paymentLabel($method)
@@ -109,22 +157,35 @@ if ($method === 'GET') {
 
     if ($endpoint === 'products') {
         $stmt = $pdo->query('SELECT * FROM products');
-        jsonResponse(array_map('formatProduct', $stmt->fetchAll()));
+        jsonResponse(productsWithCategories($pdo, $stmt->fetchAll()));
     } elseif ($endpoint === 'populars') {
         $stmt = $pdo->query('SELECT * FROM products WHERE isPopular = TRUE');
-        jsonResponse(array_map('formatProduct', $stmt->fetchAll()));
+        jsonResponse(productsWithCategories($pdo, $stmt->fetchAll()));
     } elseif ($endpoint === 'categories') {
-        // Il conteggio viene calcolato: il campo salvato in tabella può essere non aggiornato.
-        $sql = 'SELECT c.idCategory, c.nameCategory, c.icon,
-                       (SELECT COUNT(*) FROM products p
-                        WHERE p.category = c.nameCategory OR p.category = c.idCategory) AS count
-                FROM categories c
-                ORDER BY c.idCategory';
-        $stmt = $pdo->query($sql);
-        $rows = $stmt->fetchAll();
+        // Conteggio calcolato sui prodotti distinti; ordine deciso dal pannello admin.
+        try {
+            $sql = 'SELECT c.idCategory, c.nameCategory, c.icon, c.sortOrder,
+                           (SELECT COUNT(DISTINCT pc.productId) FROM product_categories pc
+                            WHERE pc.idCategory = c.idCategory) AS count
+                    FROM categories c
+                    ORDER BY c.sortOrder, c.idCategory';
+            $rows = $pdo->query($sql)->fetchAll();
+        } catch (Throwable $e) {
+            // Migrazione non ancora eseguita: si torna al comportamento precedente.
+            error_log('FastBite categories senza product_categories: ' . $e->getMessage());
+            $sql = 'SELECT c.idCategory, c.nameCategory, c.icon,
+                           0 AS sortOrder,
+                           (SELECT COUNT(*) FROM products p
+                            WHERE p.category = c.nameCategory OR p.category = c.idCategory) AS count
+                    FROM categories c
+                    ORDER BY c.idCategory';
+            $rows = $pdo->query($sql)->fetchAll();
+        }
+
         $result = array();
         foreach ($rows as $row) {
             $row['count'] = (int)$row['count'];
+            $row['sortOrder'] = (int)$row['sortOrder'];
             $result[] = $row;
         }
         jsonResponse($result);
@@ -310,11 +371,27 @@ if ($method === 'GET') {
         if ($query === '') {
             jsonResponse(array());
         }
-        $stmt = $pdo->prepare('SELECT * FROM products
-                               WHERE nameProduct LIKE ? OR category LIKE ? OR description LIKE ?');
         $searchTerm = '%' . $query . '%';
-        $stmt->execute(array($searchTerm, $searchTerm, $searchTerm));
-        jsonResponse(array_map('formatProduct', $stmt->fetchAll()));
+        try {
+            $stmt = $pdo->prepare(
+                'SELECT p.* FROM products p
+                 WHERE p.nameProduct LIKE ? OR p.description LIKE ? OR p.category LIKE ?
+                    OR EXISTS (
+                        SELECT 1
+                        FROM product_categories pc
+                        JOIN categories c ON c.idCategory = pc.idCategory
+                        WHERE pc.productId = p.IdProduct AND c.nameCategory LIKE ?
+                    )'
+            );
+            $stmt->execute(array($searchTerm, $searchTerm, $searchTerm, $searchTerm));
+            jsonResponse(productsWithCategories($pdo, $stmt->fetchAll()));
+        } catch (Throwable $e) {
+            error_log('FastBite search senza product_categories: ' . $e->getMessage());
+            $stmt = $pdo->prepare('SELECT * FROM products
+                                   WHERE nameProduct LIKE ? OR category LIKE ? OR description LIKE ?');
+            $stmt->execute(array($searchTerm, $searchTerm, $searchTerm));
+            jsonResponse(array_map('formatProduct', $stmt->fetchAll()));
+        }
     } else {
         jsonError('Endpoint GET non valido', 400);
     }

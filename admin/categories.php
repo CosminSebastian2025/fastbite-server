@@ -22,6 +22,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $check = $pdo->prepare('SELECT COUNT(*) FROM products WHERE category = ? OR category = ?');
                 $check->execute(array($cat['nameCategory'], $cat['idCategory']));
                 $used = (int)$check->fetchColumn();
+
+                if (admin_has_multi_category($pdo)) {
+                    $checkLinks = $pdo->prepare(
+                        'SELECT COUNT(DISTINCT productId) FROM product_categories WHERE idCategory = ?'
+                    );
+                    $checkLinks->execute(array($id));
+                    $used = max($used, (int)$checkLinks->fetchColumn());
+                }
+
                 if ($used > 0) {
                     flash_set('error', 'Impossibile eliminare "' . $cat['nameCategory']
                         . '": ci sono ' . $used . ' prodotti collegati. Spostali in un\'altra categoria.');
@@ -34,6 +43,58 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } catch (Throwable $e) {
             error_log('FastBite admin delete category: ' . $e->getMessage());
             flash_set('error', 'Impossibile eliminare la categoria.');
+        }
+        redirect('categories.php');
+    }
+
+    if ($formAction === 'move') {
+        $id = post_value('id');
+        $direction = post_value('direction');
+
+        if (!admin_has_category_order($pdo)) {
+            flash_set('error', 'Esegui database/migrate_multi_category.sql per ordinare le categorie.');
+            redirect('categories.php');
+        }
+        if (!in_array($direction, array('up', 'down'), true)) {
+            flash_set('error', 'Direzione non valida.');
+            redirect('categories.php');
+        }
+
+        try {
+            $rows = admin_categories_ordered($pdo);
+            $index = -1;
+            foreach ($rows as $i => $row) {
+                if ($row['idCategory'] === $id) {
+                    $index = $i;
+                    break;
+                }
+            }
+            $target = $direction === 'up' ? $index - 1 : $index + 1;
+            if ($index < 0 || $target < 0 || $target >= count($rows)) {
+                flash_set('error', 'La categoria è già in cima o in fondo.');
+                redirect('categories.php');
+            }
+
+            $pdo->beginTransaction();
+            $update = $pdo->prepare('UPDATE categories SET sortOrder = ? WHERE idCategory = ?');
+            // Rinumera tutto 1..N scambiando le due posizioni.
+            foreach ($rows as $i => $row) {
+                $position = $i;
+                if ($i === $index) {
+                    $position = $target;
+                } elseif ($i === $target) {
+                    $position = $index;
+                }
+                $update->execute(array($position + 1, $row['idCategory']));
+            }
+            $pdo->commit();
+            flash_set('ok', 'Ordine delle categorie aggiornato.');
+        } catch (Throwable $e) {
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+            error_log('FastBite admin move category: ' . $e->getMessage());
+            flash_set('error', 'Impossibile cambiare l\'ordine delle categorie.');
         }
         redirect('categories.php');
     }
@@ -87,8 +148,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     }
                 } else {
                     $newId = 'cat_' . bin2hex(random_bytes(4));
-                    $stmt = $pdo->prepare('INSERT INTO categories (idCategory, nameCategory, icon, count) VALUES (?, ?, ?, 0)');
-                    $stmt->execute(array($newId, $name, $icon !== '' ? $icon : null));
+                    if (admin_has_category_order($pdo)) {
+                        $nextOrder = (int)$pdo->query(
+                            'SELECT COALESCE(MAX(sortOrder), 0) + 1 FROM categories'
+                        )->fetchColumn();
+                        $stmt = $pdo->prepare(
+                            'INSERT INTO categories (idCategory, nameCategory, icon, count, sortOrder)
+                             VALUES (?, ?, ?, 0, ?)'
+                        );
+                        $stmt->execute(array($newId, $name, $icon !== '' ? $icon : null, $nextOrder));
+                    } else {
+                        $stmt = $pdo->prepare(
+                            'INSERT INTO categories (idCategory, nameCategory, icon, count) VALUES (?, ?, ?, 0)'
+                        );
+                        $stmt->execute(array($newId, $name, $icon !== '' ? $icon : null));
+                    }
                     recalc_category_counts($pdo);
                     flash_set('ok', 'Categoria creata: ' . $name);
                     redirect('categories.php');
@@ -134,6 +208,8 @@ if ($action === 'new' || $action === 'edit' || $repostWithErrors) {
             <a class="btn ghost" href="categories.php">Torna all'elenco</a>
         </div>
 
+        <?php admin_migration_notice($pdo); ?>
+
         <?php if (count($errors) > 0): ?>
             <div class="alert error">
                 <?php foreach ($errors as $err): ?><div><?php echo h($err); ?></div><?php endforeach; ?>
@@ -172,36 +248,72 @@ if ($action === 'new' || $action === 'edit' || $repostWithErrors) {
     exit;
 }
 
-$categories = $pdo->query(
-    'SELECT c.*,
-            (SELECT COUNT(*) FROM products p
-              WHERE p.category = c.nameCategory OR p.category = c.idCategory) AS live_count
-     FROM categories c
-     ORDER BY c.nameCategory'
-)->fetchAll();
+$orderSql = admin_has_category_order($pdo) ? 'c.sortOrder, c.nameCategory' : 'c.nameCategory';
+if (admin_has_multi_category($pdo)) {
+    $categories = $pdo->query(
+        'SELECT c.*,
+                (SELECT COUNT(DISTINCT pc.productId) FROM product_categories pc
+                  WHERE pc.idCategory = c.idCategory) AS live_count
+         FROM categories c
+         ORDER BY ' . $orderSql
+    )->fetchAll();
+} else {
+    $categories = $pdo->query(
+        'SELECT c.*,
+                (SELECT COUNT(*) FROM products p
+                  WHERE p.category = c.nameCategory OR p.category = c.idCategory) AS live_count
+         FROM categories c
+         ORDER BY ' . $orderSql
+    )->fetchAll();
+}
 
-admin_header('Categorie', 'categories');
+admin_header('Categorie', 'categories', 'page-list');
 ?>
-<div class="panel">
+<div class="panel list-panel">
     <div class="panel-head">
         <h2>Categorie (<?php echo count($categories); ?>)</h2>
         <a class="btn primary" href="categories.php?action=new">+ Nuova categoria</a>
     </div>
 
+    <?php admin_migration_notice($pdo); ?>
+
+    <p class="muted"><small>L'ordine di questa lista è quello mostrato nell'app. Usa ↑ e ↓ per spostare le categorie.</small></p>
+
     <?php if (count($categories) === 0): ?>
         <p class="muted">Nessuna categoria. Creane una per iniziare.</p>
     <?php else: ?>
+        <div class="table-scroll">
         <table class="table">
             <thead>
-            <tr><th>Icona</th><th>Nome</th><th>ID</th><th>Prodotti</th><th class="right">Azioni</th></tr>
+            <tr><th>Ordine</th><th>Icona</th><th>Nome</th><th>ID</th><th>Prodotti</th><th class="right">Azioni</th></tr>
             </thead>
             <tbody>
-            <?php foreach ($categories as $c): ?>
+            <?php $lastIndex = count($categories) - 1; ?>
+            <?php foreach ($categories as $index => $c): ?>
                 <tr>
+                    <td class="order-cell">
+                        <form method="post" action="categories.php" class="inline">
+                            <?php echo csrf_field(); ?>
+                            <input type="hidden" name="form_action" value="move">
+                            <input type="hidden" name="direction" value="up">
+                            <input type="hidden" name="id" value="<?php echo h($c['idCategory']); ?>">
+                            <button type="submit" class="btn small ghost move" title="Sposta su"
+                                <?php echo $index === 0 ? 'disabled' : ''; ?>>↑</button>
+                        </form>
+                        <form method="post" action="categories.php" class="inline">
+                            <?php echo csrf_field(); ?>
+                            <input type="hidden" name="form_action" value="move">
+                            <input type="hidden" name="direction" value="down">
+                            <input type="hidden" name="id" value="<?php echo h($c['idCategory']); ?>">
+                            <button type="submit" class="btn small ghost move" title="Sposta giù"
+                                <?php echo $index === $lastIndex ? 'disabled' : ''; ?>>↓</button>
+                        </form>
+                        <span class="muted"><?php echo (int)$index + 1; ?></span>
+                    </td>
                     <td class="emoji"><?php echo h($c['icon']); ?></td>
                     <td><strong><?php echo h($c['nameCategory']); ?></strong></td>
                     <td><small class="muted"><?php echo h($c['idCategory']); ?></small></td>
-                    <td><a href="products.php?category=<?php echo h(urlencode($c['nameCategory'])); ?>"><?php echo (int)$c['live_count']; ?></a></td>
+                    <td><a href="products.php?category=<?php echo h(urlencode($c['idCategory'])); ?>"><?php echo (int)$c['live_count']; ?></a></td>
                     <td class="right nowrap">
                         <a class="btn small ghost" href="categories.php?action=edit&id=<?php echo h(urlencode($c['idCategory'])); ?>">Modifica</a>
                         <form method="post" action="categories.php" class="inline"
@@ -216,6 +328,7 @@ admin_header('Categorie', 'categories');
             <?php endforeach; ?>
             </tbody>
         </table>
+        </div>
     <?php endif; ?>
 </div>
 <?php admin_footer(); ?>
