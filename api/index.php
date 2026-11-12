@@ -4,20 +4,23 @@
  * PHP 7.1+ / MySQL
  *
  * Prima di caricare questo file sul server:
- * 1) il database del server si chiama "AppFood":
- *      SHOW DATABASES;
- * 2) se il tuo DB si chiama diversamente, cambia DB_NAME qui sotto;
+ * 1) crea lo schema con database/init_database.sql (database "AppFood");
+ * 2) se il tuo MySQL usa credenziali diverse, compila config/database.local.php;
  * 3) fai un backup del vecchio /api/index.php e poi sostituiscilo con questo.
  */
 
 // ==========================================
 // CONFIGURAZIONE DATABASE
+// Credenziali lette da config/database.php (override in config/database.local.php
+// oppure con le variabili d'ambiente FASTBITE_DB_*).
 // ==========================================
-define('DB_HOST', '127.0.0.1');
-define('DB_NAME', 'AppFood');   // <-- nome del database MySQL sul server
-define('DB_USER', 'root');      // <-- utente MySQL
-define('DB_PASS', '');          // <-- password MySQL (XAMPP default: vuota)
-define('DB_CHARSET', 'utf8mb4');
+$dbConfig = require dirname(__DIR__) . '/config/database.php';
+define('DB_HOST', $dbConfig['host']);
+define('DB_PORT', $dbConfig['port']);
+define('DB_NAME', $dbConfig['name']);
+define('DB_USER', $dbConfig['user']);
+define('DB_PASS', $dbConfig['pass']);
+define('DB_CHARSET', $dbConfig['charset']);
 
 // ==========================================
 // CORS
@@ -133,7 +136,7 @@ function paymentLabel($method)
 // ==========================================
 try {
     $pdo = new PDO(
-        'mysql:host=' . DB_HOST . ';dbname=' . DB_NAME . ';charset=' . DB_CHARSET,
+        'mysql:host=' . DB_HOST . ';port=' . DB_PORT . ';dbname=' . DB_NAME . ';charset=' . DB_CHARSET,
         DB_USER,
         DB_PASS,
         array(

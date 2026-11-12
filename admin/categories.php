@@ -52,7 +52,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $direction = post_value('direction');
 
         if (!admin_has_category_order($pdo)) {
-            flash_set('error', 'Esegui database/migrate_multi_category.sql per ordinare le categorie.');
+            flash_set('error', 'Schema non aggiornato: manca categories.sortOrder. Applica database/init_database.sql su un database nuovo.');
             redirect('categories.php');
         }
         if (!in_array($direction, array('up', 'down'), true)) {

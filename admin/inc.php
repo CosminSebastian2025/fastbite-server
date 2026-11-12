@@ -3,15 +3,17 @@
  * FastBite Admin - configurazione, connessione DB e helper condivisi.
  * PHP 7.1+ / MySQL-MariaDB
  *
- * Credenziali di default XAMPP. Se il tuo MySQL usa altre credenziali
- * modifica le costanti qui sotto (oppure imposta le variabili d'ambiente).
+ * Le credenziali arrivano da config/database.php: per cambiarle crea
+ * config/database.local.php oppure imposta le variabili FASTBITE_DB_*.
  */
 
-define('ADMIN_DB_HOST', getenv('FASTBITE_DB_HOST') !== false ? getenv('FASTBITE_DB_HOST') : '127.0.0.1');
-define('ADMIN_DB_PORT', getenv('FASTBITE_DB_PORT') !== false ? (int)getenv('FASTBITE_DB_PORT') : 3306);
-define('ADMIN_DB_NAME', getenv('FASTBITE_DB_NAME') !== false ? getenv('FASTBITE_DB_NAME') : 'AppFood');
-define('ADMIN_DB_USER', getenv('FASTBITE_DB_USER') !== false ? getenv('FASTBITE_DB_USER') : 'root');
-define('ADMIN_DB_PASS', getenv('FASTBITE_DB_PASS') !== false ? getenv('FASTBITE_DB_PASS') : '');
+// Configurazione MySQL condivisa con l'API (override in config/database.local.php).
+$dbConfig = require dirname(__DIR__) . '/config/database.php';
+define('ADMIN_DB_HOST', $dbConfig['host']);
+define('ADMIN_DB_PORT', $dbConfig['port']);
+define('ADMIN_DB_NAME', $dbConfig['name']);
+define('ADMIN_DB_USER', $dbConfig['user']);
+define('ADMIN_DB_PASS', $dbConfig['pass']);
 
 error_reporting(E_ALL);
 ini_set('display_errors', '0');
@@ -270,9 +272,9 @@ function admin_migration_notice(PDO $pdo)
     if (admin_has_multi_category($pdo) && admin_has_category_order($pdo)) {
         return;
     }
-    echo '<div class="alert error">Migrazione database mancante: esegui '
-        . '<code>database/migrate_multi_category.sql</code> su phpMyAdmin per attivare '
-        . 'prodotti in più categorie e ordinamento delle categorie.</div>';
+    echo '<div class="alert error">Schema database non aggiornato: mancano '
+        . '<code>product_categories</code> e/o <code>categories.sortOrder</code>. '
+        . 'Applica <code>database/init_database.sql</code> su un database nuovo.</div>';
 }
 
 /** Intestazione comune delle pagine del pannello. */

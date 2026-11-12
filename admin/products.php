@@ -179,7 +179,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if (count($validIds) === 0) {
                 $errors[] = 'Categorie non valide.';
             } elseif (!admin_has_multi_category($pdo) && count($validIds) > 1) {
-                $errors[] = 'Il database non supporta ancora più categorie: esegui database/migrate_multi_category.sql.';
+                $errors[] = 'Il database non supporta ancora più categorie: manca la tabella product_categories. Applica database/init_database.sql su un database nuovo.';
             }
             $selectedCategoryIds = $validIds;
         }
